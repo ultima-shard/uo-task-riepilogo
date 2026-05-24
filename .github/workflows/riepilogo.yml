@@ -2,20 +2,14 @@ name: Riepilogo Task Discord
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # ogni 5 minuti
-  workflow_dispatch:          # run manuale dal tab Actions
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 jobs:
   aggiorna:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
 
       - name: Installa dipendenze
         run: pip install requests pytz
