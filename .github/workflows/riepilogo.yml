@@ -1,24 +1,84 @@
 name: Riepilogo Task Discord
 
+# ----------------------------------------------------------------------------
+# COME FUNZIONA
+# Lo scheduler "vero" NON e' il cron di GitHub: e' il loop interno qui sotto,
+# che esegue lo script ogni 5 minuti con precisione (usa `sleep`, che e' esatto).
+#
+# Il cron di GitHub serve SOLO a (ri)avviare il loop ~una volta all'ora.
+# I ritardi e i drop dello scheduler di GitHub (documentati: best-effort, fino
+# a 30-60 min di ritardo, run scartati sotto carico) NON hanno piu' impatto:
+# anche se un avvio orario arriva in ritardo, il loop precedente sta ancora
+# girando (dura ~110 min, piu' dell'intervallo orario).
+#
+# Su un repository PUBBLICO i minuti di GitHub Actions sono illimitati e
+# gratuiti, quindi tenere un job sempre attivo non costa nulla.
+# ----------------------------------------------------------------------------
+
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
+    - cron: "17 * * * *"   # ~ogni ora, al minuto :17 (evita il picco di carico a :00)
+  workflow_dispatch:        # avvio / riavvio manuale dall'interfaccia Actions
+
+# Un solo loop attivo per volta: ogni nuovo avvio sostituisce quello in corso.
+concurrency:
+  group: riepilogo-task-discord
+  cancel-in-progress: true
+
+permissions:
+  contents: write           # serve solo allo step "keepalive" (commit vuoto)
 
 jobs:
-  aggiorna:
+  loop:
     runs-on: ubuntu-latest
+    timeout-minutes: 120    # il loop dura ~110 min; il limite hard di GitHub e' 6h
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # I workflow programmati su repo pubblici vengono DISATTIVATI in automatico
+      # dopo 60 giorni senza nuovi commit. Questo step fa un commit vuoto se
+      # l'ultimo commit ha piu' di 50 giorni, mantenendo lo scheduler attivo.
+      - name: Keepalive (anti-disattivazione dopo 60 giorni)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          last=$(git log -1 --format=%ct)
+          age_days=$(( ( $(date +%s) - last ) / 86400 ))
+          echo "Ultimo commit: $age_days giorni fa."
+          if [ "$age_days" -ge 50 ]; then
+            git commit --allow-empty -m "chore: keepalive scheduler [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "Commit keepalive eseguito."
+          else
+            echo "Keepalive non necessario."
+          fi
 
       - name: Installa dipendenze
         run: pip install requests pytz
 
-      - name: Esegui script
+      - name: Loop di aggiornamento ogni 5 minuti (~110 minuti)
         env:
           NOTION_TOKEN:          ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID:    ${{ secrets.NOTION_DATABASE_ID }}
           DISCORD_WEBHOOK_ID:    ${{ secrets.DISCORD_WEBHOOK_ID }}
           DISCORD_WEBHOOK_TOKEN: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
           DISCORD_MESSAGE_ID:    ${{ secrets.DISCORD_MESSAGE_ID }}
-        run: python riepilogo_task.py
+        run: |
+          loop_end=$(( $(date +%s) + 6600 ))   # 110 minuti
+          cycle=0
+          while [ "$(date +%s)" -lt "$loop_end" ]; do
+            cycle=$(( cycle + 1 ))
+            cycle_start=$(date +%s)
+            echo "── Ciclo $cycle — $(date -u '+%Y-%m-%d %H:%M:%S UTC') ──"
+            python riepilogo_task.py || echo "::warning::Ciclo $cycle fallito, ritento al prossimo."
+            # Mantiene una cadenza esatta di 5 minuti a prescindere dalla
+            # durata dello script.
+            elapsed=$(( $(date +%s) - cycle_start ))
+            sleep_for=$(( 300 - elapsed ))
+            if [ "$sleep_for" -gt 0 ] && [ "$(date +%s)" -lt "$loop_end" ]; then
+              sleep "$sleep_for"
+            fi
+          done
+          echo "Loop terminato: in attesa del prossimo avvio orario."
